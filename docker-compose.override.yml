@@ -1,0 +1,29 @@
+# 本地构建覆盖文件（Compose 会自动与本目录的 docker-compose.yml 合并）
+#
+# 背景：华为云 SWR 上的 jeepay/mysql:8 与 jeepay/eclipse-temurin:17-jre 只发布了
+# arm64/v8 单一架构，在 amd64 宿主上拉取会成功但运行时报 "exec format error"
+# （构建阶段表现为 RUN mkdir -p 失败，exit 255）。加 platform: linux/amd64 也无法解决，
+# 因为该仓库根本没有 amd64 变体。
+#
+# 因此这里把这两个镜像指向 Docker Hub 的多架构版本，amd64 / arm64 宿主均可自动选择正确架构。
+# 上游修复后（或改用支持 amd64 的镜像仓库）可删除本文件。
+
+services:
+  mysql:
+    image: mysql:8.0.25
+
+  # 三个后端服务共用同一个 Dockerfile，通过 BASE_IMAGE 构建参数替换 JRE 基础镜像
+  payment:
+    build:
+      args:
+        BASE_IMAGE: eclipse-temurin:17-jre
+
+  manager:
+    build:
+      args:
+        BASE_IMAGE: eclipse-temurin:17-jre
+
+  merchant:
+    build:
+      args:
+        BASE_IMAGE: eclipse-temurin:17-jre

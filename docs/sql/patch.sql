@@ -303,3 +303,14 @@ alter table t_transfer_order add column `channel_res_data` TEXT DEFAULT NULL COM
 
 
 ## -- ++++ [v3.1.0] ===> NEXT
+
+-- 增加易支付（彩虹易支付协议）通道
+-- 先 DELETE 再 INSERT，保证本脚本可重复执行（该通道已存在于 init.sql）
+DELETE FROM t_pay_interface_define WHERE if_code = 'ezfp';
+INSERT INTO t_pay_interface_define (if_code, if_name, is_mch_mode, is_isv_mode, config_page_type, isv_params, isvsub_mch_params, normal_mch_params, way_codes, icon, bg_color, state, remark)
+VALUES ('ezfp', '易支付', 1, 0, 1,
+        NULL,
+        NULL,
+        '[{"name":"gatewayUrl","desc":"支付网关地址(如 https://www.ezfpy.cn , 结尾不要带斜杠)","type":"text","verify":"required"},{"name":"pid","desc":"商户ID(PID)","type":"text","verify":"required"},{"name":"key","desc":"商户密钥","type":"textarea","verify":"required","star":"1"}]',
+        '[{"wayCode": "ALI_QR"}, {"wayCode": "ALI_WAP"}, {"wayCode": "WX_NATIVE"}, {"wayCode": "WX_H5"}]',
+        NULL, '#00A2A0', 1, '易支付(彩虹易支付协议), 仅支持支付与查单, 不支持退款');

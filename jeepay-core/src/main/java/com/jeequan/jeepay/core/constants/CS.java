@@ -148,6 +148,7 @@ public class CS {
         String XXPAY = "xxpay";     // 小新支付
         String PPPAY = "pppay";     // Paypal 支付
         String PLSPAY = "plspay";     // 计全支付plus
+        String EZFP = "ezfp";     // 易支付(彩虹易支付协议)
     }
 
 

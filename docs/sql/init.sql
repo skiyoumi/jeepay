@@ -776,3 +776,13 @@ VALUES ('plspay', '计全付', 1, 0, 1,
         '[{"wayCode": "ALI_APP"}, {"wayCode": "ALI_BAR"}, {"wayCode": "ALI_JSAPI"}, {"wayCode": "ALI_LITE"}, {"wayCode": "ALI_PC"}, {"wayCode": "ALI_QR"}, {"wayCode": "ALI_WAP"}, {"wayCode": "WX_APP"}, {"wayCode": "WX_BAR"}, {"wayCode": "WX_H5"}, {"wayCode": "WX_JSAPI"}, {"wayCode": "WX_LITE"}, {"wayCode": "WX_NATIVE"}]',
         'http://jeequan.oss-cn-beijing.aliyuncs.com/jeepay/img/plspay.svg', '#0CACFF', 1, '计全付');
 
+-- 易支付(彩虹易支付协议)通道
+-- icon 留空, 前端卡片以 v-if 判断, 无图标时仅展示背景色; 需要图标可自行替换为该图片地址
+INSERT INTO t_pay_interface_define (if_code, if_name, is_mch_mode, is_isv_mode, config_page_type, isv_params, isvsub_mch_params, normal_mch_params, way_codes, icon, bg_color, state, remark)
+VALUES ('ezfp', '易支付', 1, 0, 1,
+        NULL,
+        NULL,
+        '[{"name":"gatewayUrl","desc":"支付网关地址(如 https://www.ezfpy.cn , 结尾不要带斜杠)","type":"text","verify":"required"},{"name":"pid","desc":"商户ID(PID)","type":"text","verify":"required"},{"name":"key","desc":"商户密钥","type":"textarea","verify":"required","star":"1"}]',
+        '[{"wayCode": "ALI_QR"}, {"wayCode": "ALI_WAP"}, {"wayCode": "WX_NATIVE"}, {"wayCode": "WX_H5"}]',
+        NULL, '#00A2A0', 1, '易支付(彩虹易支付协议), 仅支持支付与查单, 不支持退款');
+
