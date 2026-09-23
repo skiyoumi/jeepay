@@ -1,21 +1,34 @@
 # 追加到已有 Caddy 的站点片段
 
-⚠️ 你的 Caddy 是**容器**（示例里叫 `sub2api-caddy`），不是宿主机服务。这带来两个和网上教程不一样的点：
+针对你这台服务器的实际情况（Caddy 是容器 `sub2api-caddy`，Caddyfile 在
+`/usr/local/modelscube/deploy/Caddyfile`，用自己的证书而非 Let's Encrypt 自动签）。
 
-## 一、上游地址不能写 127.0.0.1
+---
 
-Caddy 容器里的 `127.0.0.1` 是它**自己**，不是宿主机，所以 `reverse_proxy 127.0.0.1:9226`
-必然连不上。正确做法是把 Caddy 容器接到 jeepay 的 Docker 网络上，用**容器名**当上游。
+## 一、上游不能用 `127.0.0.1`，也不能用 `host.docker.internal`
 
-jeepay 的编排文件已经把这个网络固定命名为 `jeepay-net`，执行一次：
+Caddy 是容器：
+
+- `127.0.0.1` 指 **Caddy 容器自己**，连不到 jeepay；
+- `host.docker.internal` 虽然你 Caddyfile 里对宿主机服务是这么用的
+  （`hermes.modelscube.com`、`aiorder.modelscube.com`），但**对 jeepay 不适用** ——
+  jeepay 的三个 UI 端口绑在宿主机的 `127.0.0.1`（见 `docker-compose.prod.yml`），
+  容器经 `host.docker.internal` 过来走的是 docker 网桥网卡而不是回环网卡，
+  会被拒绝连接。
+
+所以用**容器名**上游，这也是你已经在用的方式（`sub2api:8080`、`k12-backend:3000`）。
+
+jeepay 的编排文件把网络固定命名为 `jeepay-net`，接一次即可：
 
 ```bash
 docker network connect jeepay-net sub2api-caddy
+
+# 验证（应能解析出 IP）
+docker exec sub2api-caddy nslookup jeepay-ui-payment
 ```
 
-> 这一步是即时的，容器不用重启。但 `sub2api-caddy` 被**重建**（比如你重跑 sub2api 那套
-> `docker compose up -d --force-recreate`）后连接会丢失，需要重新执行。
-> 想一劳永逸，就在 sub2api 的 compose 里加一段：
+> ⚠️ `sub2api-caddy` 每次被**重建**（重跑 sub2api 那套 compose）后这个连接会丢失，
+> 需要重新执行。想一劳永逸，在 sub2api 的 compose 里加：
 >
 > ```yaml
 > services:
@@ -29,43 +42,52 @@ docker network connect jeepay-net sub2api-caddy
 >     external: true
 > ```
 
-验证连通（在 Caddy 容器内 ping 一下 UI 容器）：
+---
 
-```bash
-docker exec sub2api-caddy nslookup jeepay-ui-payment
-```
+## 二、追加站点配置
 
-## 二、找到 Caddyfile 并追加这三段
-
-Caddy 容器的配置文件在宿主机上的位置：
-
-```bash
-docker inspect sub2api-caddy --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
-```
-
-找到映射到 `/etc/caddy` 或 Caddyfile 的那条，编辑宿主机上的文件，
-**追加到末尾**（不要新建文件、不要重复写全局 `{}` 块 —— 一个 Caddyfile 只能有一个全局块，
-重复会导致启动失败）：
+编辑宿主机上的 `/usr/local/modelscube/deploy/Caddyfile`，**追加到末尾**：
 
 ```caddy
-pay.example.com {
-	encode gzip
-	reverse_proxy jeepay-ui-payment:80
+# ============================================================================
+# Jeepay 支付平台
+# ============================================================================
+pay.modelscube.com {
+    tls /etc/caddy/ssl/server.crt /etc/caddy/ssl/server.key
+
+    reverse_proxy jeepay-ui-payment:80 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+    }
 }
 
-mch.example.com {
-	encode gzip
-	reverse_proxy jeepay-ui-merchant:80
+mch.modelscube.com {
+    tls /etc/caddy/ssl/server.crt /etc/caddy/ssl/server.key
+
+    reverse_proxy jeepay-ui-merchant:80 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+    }
 }
 
-mgr.example.com {
-	encode gzip
-	reverse_proxy jeepay-ui-manager:80
+mgr.modelscube.com {
+    tls /etc/caddy/ssl/server.crt /etc/caddy/ssl/server.key
+
+    reverse_proxy jeepay-ui-manager:80 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+    }
 }
 ```
 
-把 `example.com` 换成你的真实域名，确保 A 记录已解析到这台服务器的公网 IP
-（80/443 已经在 `sub2api-caddy` 上发布了，不用再动）。
+上游写的是容器内 nginx 的 **80**，**不是**宿主机的 9226/9228/9227 ——
+那三个端口只绑在宿主机 `127.0.0.1`，是给你不上 Caddy 时本机调试用的。
 
 重载：
 
@@ -73,33 +95,60 @@ mgr.example.com {
 docker exec sub2api-caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-> 配置文件的**容器内路径**以 `docker inspect` 输出为准，常见是 `/etc/caddy/Caddyfile`
-> 或 `/etc/caddy/Caddyfile.d/xxx`。`reload` 用错路径会报错，按实际输出调整。
-> 实在不确定就直接 `docker restart sub2api-caddy`（会短暂中断它现在代理的服务）。
+> 已有的 `:80 { redir https://{host}{uri} }` 兜底块**不用动**，它会自动照管这三个新域名的
+> http 跳转，与其它站点块共存的方式和你现在完全一致。
 
-## 三、端口对应关系
+---
 
-| 域名 | 上游容器 | 作用 |
-| --- | --- | --- |
-| pay.xxx | `jeepay-ui-payment:80` | 收银台静态页 + `/api/` 反代到 payment(9216)。系统配置的「支付网关地址」填它；易支付的 `notify_url`、`return_url`、扫码二维码图片都走它 |
-| mch.xxx | `jeepay-ui-merchant:80` | 商户平台。系统配置的「商户平台网址」填它 |
-| mgr.xxx | `jeepay-ui-manager:80` | 运营平台。系统配置的「运营平台网址」「公共oss访问地址」填它 |
+## 三、先确认证书覆盖这三个域名
 
-注意上游写的是 **80**（容器内 nginx 的端口），不是宿主机的 9226/9228/9227 ——
-那三个端口只绑在宿主机的 `127.0.0.1` 上，是给你不上 Caddy 时本机调试用的，Caddy 用不到。
+你用的是自己的证书，**证书里没有这三个域名的话 Caddy 能起来但浏览器会报证书错误**
+（Caddy 不会像 Let's Encrypt 那样自动签）：
 
-## 四、X-Forwarded-Proto
+```bash
+openssl x509 -in /usr/local/modelscube/deploy/ssl/server.crt -noout -text \
+  | grep -A1 "Subject Alternative Name"
+```
 
-Caddy 默认就会带上 `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host`，
-jeepay 三个后端都配了 `server.forward-headers-strategy: framework`，
-ui-* 里挂载的 nginx 模板也补了 `proxy_set_header X-Forwarded-Proto $scheme;`，
-所以收银台 `return_url`、微信 H5 `redirect_url` 能正确拼出 `https://` 协议头。
+输出里要有 `*.modelscube.com`（或把 pay/mch/mgr 三个具体域名都列出来）。
+你现有 `hermes`、`aiorder`、`brain` 都是 `*.modelscube.com` 下的，大概率通配符已覆盖 ——
+确认一下即可。
 
-如果你现有的 Caddyfile 里对这几个头做过 `header_up` 覆盖（比如 `header_up X-Forwarded-Proto http`），
-请把这行去掉，否则支付回调地址会退化成 http。
+如果不覆盖，两个办法：
 
-## 五、只想暴露一个域名？
+- 重新签一张带 `*.modelscube.com` 的证书，替换 `deploy/ssl/server.crt` / `server.key`；
+- 或者直接用 Caddy 自动申请（**删掉 `tls` 那行**，并把 `{ email ... }` 全局块（如果已有）配好）。
+  但混用两种签发方式容易乱，建议还是补证书。
 
-Jeepay 三个前端各自是独立的 Vue 应用（各自的静态资源路径、各自的 `/api/`），
-挂在同一个域名下要用 `handle` 按路径分派并改写路径前缀，改造成本远高于
-多申请两个子域名 + 一张泛域名证书。**推荐用三个子域名。**
+另外，不管哪种方式，**A 记录都要先把 pay/mch/mgr 三个子域名解析到这台服务器**。
+
+---
+
+## 四、X-Forwarded-Proto 的正确处理
+
+Caddy 这里 `header_up X-Forwarded-Proto https` 是**必须保留**的。
+
+jeepay 后端配了 `server.forward-headers-strategy: framework`，靠这个头拼出
+收银台 `return_url` 和微信 H5 `redirect_url` 的协议。链路是：
+
+```
+浏览器 --https--> Caddy --http--> nginx(ui-*) --http--> 后端
+                                  ▲
+                    这里【不能】覆盖 X-Forwarded-Proto
+```
+
+`conf/nginx/default.conf.template` 里特地**没有**写
+`proxy_set_header X-Forwarded-Proto $scheme;` ——
+因为 nginx 收到的是 Caddy 发来的 http，`$scheme` 恒为 `http`，
+写了就会把 Caddy 设好的 `https` 覆盖掉。不写则保持 nginx 默认行为（原样透传）。
+
+---
+
+## 五、只想暴露两个域名？
+
+运营平台 `mgr` 完全可以不挂公网（内网访问更安全），删掉第三段即可，
+但系统配置里的「运营平台网址」「公共oss访问地址」仍要填一个能访问到的地址 ——
+可以填 `https://mgr.modelscube.com` 但改用 IP 白名单，或换成内网地址。
+
+三个前端各自是独立的 Vue 应用（各自的静态资源路径、各自的 `/api/`），
+想合并到一个域名下要用 `handle` 按路径分派并改写路径前缀，改造成本高，不推荐。

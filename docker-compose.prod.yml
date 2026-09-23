@@ -19,6 +19,12 @@
 # 注意：使用 -f docker-compose.prod.yml 时 Compose 不会自动合并 docker-compose.override.yml，
 #      本文件是自包含的。切换编排文件前请先执行 down，避免两套文件互相覆盖容器。
 
+# 固定 compose 项目名：默认按目录名推导，部署包解压到 jeepay-deploy/ 就会变成
+# "jeepay-deploy"，导致数据卷变成 jeepay-deploy_mysql 等；写死后无论解压到哪个
+# 目录，卷名恒为 jeepay_mysql / jeepay_redis / jeepay_uploads，便于文档里的备份、
+# 清理、迁移命令始终有效。
+name: jeepay
+
 services:
   mysql:
     hostname: mysql

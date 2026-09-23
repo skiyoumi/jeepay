@@ -49,9 +49,9 @@ docker build -t $REG/jeepay-manager:$TAG --build-arg BASE_IMAGE=eclipse-temurin:
 docker build -t $REG/jeepay-merchant:$TAG --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-merchant
 
 # 三个前端（构建上下文是 jeepay-ui 目录，靠 PLATFORM 区分）
-docker build -t $REG/jeepay-ui-payment:$TAG  --build-arg PLATFORM=cashier  ../jeepay-ui
-docker build -t $REG/jeepay-ui-manager:$TAG  --build-arg PLATFORM=manager  ../jeepay-ui
-docker build -t $REG/jeepay-ui-merchant:$TAG --build-arg PLATFORM=merchant ../jeepay-ui
+docker build -t $REG/jeepay-ui-payment:$TAG  --build-arg PLATFORM=cashier  ./jeepay-ui
+docker build -t $REG/jeepay-ui-manager:$TAG  --build-arg PLATFORM=manager  ./jeepay-ui
+docker build -t $REG/jeepay-ui-merchant:$TAG --build-arg PLATFORM=merchant ./jeepay-ui
 
 docker push $REG/jeepay-payment:$TAG
 docker push $REG/jeepay-manager:$TAG
@@ -126,11 +126,15 @@ README-部署.txt
 上传并解压：
 
 ```bash
-scp deploy-out/jeepay-deploy-*.tar.gz root@你的服务器:/opt/
+scp deploy-out/jeepay-deploy-*.tar.gz root@你的服务器:/usr/local/modelscube/jneelypay/
 
 # 服务器上
-cd /opt && tar -xzf jeepay-deploy-*.tar.gz && cd jeepay-deploy
+cd /usr/local/modelscube/jneelypay && tar -xzf jeepay-deploy-*.tar.gz && cd jeepay-deploy
 ```
+
+> 解压出来的目录名是 `jeepay-deploy`，不影响任何东西 —— `docker-compose.prod.yml`
+> 里写死了 `name: jeepay`，compose 项目名和数据卷名（`jeepay_mysql`、`jeepay_redis`、
+> `jeepay_uploads`）都与目录名无关，命令在文档和服务器之间可以原样复制。
 
 ### 2. 修改 `conf/*/application.yml`（三份都要改）
 
@@ -163,9 +167,13 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
   极可能与现有网络冲突并导致 `up` 报
   `Pool overlaps with other one on this address space`。
   这里改为 Docker 自动选网段 + 服务名互访，网络名固定为 `jeepay-net`；
-- `ui-*` 额外挂载了 `conf/nginx/default.conf.template`。因为 nginx 的
-  `proxy_pass http://$BACKEND_HOST` 带变量时是**请求期解析**，必须指定 DNS 服务器，
-  模板里比镜像内置版本多一行 `resolver 127.0.0.11`（Docker 内置 DNS）。
+- `ui-*` 额外挂载了 `conf/nginx/default.conf.template`。镜像内置模板直接写
+  `proxy_pass http://$BACKEND_HOST`，而 nginx 镜像的 entrypoint 会用 envsubst 在
+  **容器启动阶段**把它替换成字面量（如 `http://payment:9216`），nginx 于是在启动时
+  解析一次并**缓存 IP** —— 之后单独重建 `payment` 容器（IP 变了），
+  ui 容器仍指向旧 IP，返回 502，必须连同 ui-* 一起重启才能恢复。
+  模板改成 `set $upstream "http://$BACKEND_HOST"; proxy_pass $upstream;` +
+  `resolver 127.0.0.11`，把解析推迟到**请求期**，后端重建后自动跟上。
 
 > 使用 `-f docker-compose.prod.yml` 时 Compose **不会**自动合并 `docker-compose.override.yml`，
 > 该文件是自包含的。从旧编排文件切过来时先 `down`，避免两套文件互相覆盖容器。
@@ -302,6 +310,9 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 只改了后端、前端没动时，也可以用 `up -d payment` 只重启单个服务，
 但 `IMAGE_TAG` 是全量的，没重新构建的前端镜像会因 tag 不存在而拉取失败 ——
 **稳妥做法是六个一起推、一起拉**。
+
+> 单独 `up -d payment` 不会让 ui-* 失效：ui 的 nginx 模板把上游解析推迟到了请求期
+> （见第二节末尾的说明），payment 换 IP 后 ui 会自动跟上。
 
 > 服务器上**不需要重新上传部署包**：纯版本升级只改 `.env.prod` 里的 `IMAGE_TAG`。
 > 只有下列文件发生变化时才需要重新 `make-bundle.sh` + 上传：
