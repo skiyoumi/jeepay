@@ -6,7 +6,11 @@
 #   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 #
 # 与 docker-compose.yml 的差异（均出于生产环境考虑，请勿直接改回）：
-#   1. 六个业务服务只 pull 不 build，镜像由本地构建后推送到私有仓库；
+#   1. 六个业务服务只 pull 不 build，镜像由本地构建后推送到私有仓库。
+#      六个镜像【共用同一个仓库】，靠 tag 后缀区分角色，例如仓库 skiyoumi/jneelypay：
+#        ${IMAGE_TAG}-payment / -manager / -merchant / -ui-payment / -ui-manager / -ui-merchant
+#      所以 .env.prod 里的 REGISTRY 要写到仓库名（<registry>/<namespace>/<repo>），
+#      升级时只改 IMAGE_TAG 一处即可整体切版本；
 #   2. 所有端口只绑定 127.0.0.1，统一由已存在的 Caddy 容器反代并终结 HTTPS，
 #      避免 MySQL/Redis/RocketMQ 直接暴露到公网；
 #   3. 不占用固定网段、不使用静态 IP —— 服务器上往往已有多个 compose 项目，
@@ -120,7 +124,7 @@ services:
       - redis:/data
 
   payment:
-    image: ${REGISTRY}/jeepay-payment:${IMAGE_TAG}
+    image: ${REGISTRY}:${IMAGE_TAG}-payment
     hostname: payment
     container_name: jeepay-payment
     restart: always
@@ -148,7 +152,7 @@ services:
       - uploads:/jeepayhomes/service/uploads
 
   manager:
-    image: ${REGISTRY}/jeepay-manager:${IMAGE_TAG}
+    image: ${REGISTRY}:${IMAGE_TAG}-manager
     hostname: manager
     container_name: jeepay-manager
     restart: always
@@ -173,7 +177,7 @@ services:
       - uploads:/jeepayhomes/service/uploads
 
   merchant:
-    image: ${REGISTRY}/jeepay-merchant:${IMAGE_TAG}
+    image: ${REGISTRY}:${IMAGE_TAG}-merchant
     hostname: merchant
     container_name: jeepay-merchant
     restart: always
@@ -199,7 +203,7 @@ services:
   # 统一收银台 + 支付网关 HTTP 入口：既托管 cashier 静态页，又把 /api/ 反代到 payment，
   # 因此 paySiteUrl 指向本服务即可同时满足收银台访问与异步通知回调。
   ui-payment:
-    image: ${REGISTRY}/jeepay-ui-payment:${IMAGE_TAG}
+    image: ${REGISTRY}:${IMAGE_TAG}-ui-payment
     hostname: payment-ui
     container_name: jeepay-ui-payment
     restart: always
@@ -217,7 +221,7 @@ services:
         condition: service_healthy
 
   ui-manager:
-    image: ${REGISTRY}/jeepay-ui-manager:${IMAGE_TAG}
+    image: ${REGISTRY}:${IMAGE_TAG}-ui-manager
     hostname: manager-ui
     container_name: jeepay-ui-manager
     restart: always
@@ -232,7 +236,7 @@ services:
         condition: service_healthy
 
   ui-merchant:
-    image: ${REGISTRY}/jeepay-ui-merchant:${IMAGE_TAG}
+    image: ${REGISTRY}:${IMAGE_TAG}-ui-merchant
     hostname: merchant-ui
     container_name: jeepay-ui-merchant
     restart: always

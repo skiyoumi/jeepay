@@ -3,7 +3,8 @@
 适用场景：本地构建镜像 → 推送到阿里云个人版 ACR → 服务器只拉镜像运行，
 HTTPS 由服务器上**已有的 Caddy** 终结。
 
-本文以 `<registry>` = `crpi-1a0zvjxwrmr36txn.cn-hongkong.personal.cr.aliyuncs.com/skiyoumi` 为例。
+本文以镜像仓库 = `crpi-1a0zvjxwrmr36txn.cn-hongkong.personal.cr.aliyuncs.com/skiyoumi/jneelypay` 为例。
+**六个镜像共用这一个仓库**，靠 tag 后缀区分角色（`3.2.9-ezfp-payment`、`3.2.9-ezfp-ui-merchant` …）。
 
 > ⚠️ **不要用 `docs/deploy/shell.md` 里的 install.sh。**
 > 那个脚本拉的是华为云 SWR 上的官方预编译镜像（`jeepay-*:3.2.0`），
@@ -40,39 +41,40 @@ docker login --username=本初独然为月 crpi-1a0zvjxwrmr36txn.cn-hongkong.per
 
 ```bash
 set -e
-REG=crpi-1a0zvjxwrmr36txn.cn-hongkong.personal.cr.aliyuncs.com/skiyoumi
-TAG=3.2.9-ezfp          # 建议用版本号，便于回滚
+REPO=crpi-1a0zvjxwrmr36txn.cn-hongkong.personal.cr.aliyuncs.com/skiyoumi/jneelypay
+TAG=3.2.9-ezfp          # 版本前缀，建议用版本号，便于回滚
 
 # 三个后端
-docker build -t $REG/jeepay-payment:$TAG --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-payment
-docker build -t $REG/jeepay-manager:$TAG --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-manager
-docker build -t $REG/jeepay-merchant:$TAG --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-merchant
+docker build -t $REPO:$TAG-payment  --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-payment
+docker build -t $REPO:$TAG-manager  --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-manager
+docker build -t $REPO:$TAG-merchant --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-merchant
 
 # 三个前端（构建上下文是 jeepay-ui 目录，靠 PLATFORM 区分）
-docker build -t $REG/jeepay-ui-payment:$TAG  --build-arg PLATFORM=cashier  ./jeepay-ui
-docker build -t $REG/jeepay-ui-manager:$TAG  --build-arg PLATFORM=manager  ./jeepay-ui
-docker build -t $REG/jeepay-ui-merchant:$TAG --build-arg PLATFORM=merchant ./jeepay-ui
+docker build -t $REPO:$TAG-ui-payment  --build-arg PLATFORM=cashier  ./jeepay-ui
+docker build -t $REPO:$TAG-ui-manager  --build-arg PLATFORM=manager  ./jeepay-ui
+docker build -t $REPO:$TAG-ui-merchant --build-arg PLATFORM=merchant ./jeepay-ui
 
-docker push $REG/jeepay-payment:$TAG
-docker push $REG/jeepay-manager:$TAG
-docker push $REG/jeepay-merchant:$TAG
-docker push $REG/jeepay-ui-payment:$TAG
-docker push $REG/jeepay-ui-manager:$TAG
-docker push $REG/jeepay-ui-merchant:$TAG
+docker push $REPO:$TAG-payment
+docker push $REPO:$TAG-manager
+docker push $REPO:$TAG-merchant
+docker push $REPO:$TAG-ui-payment
+docker push $REPO:$TAG-ui-manager
+docker push $REPO:$TAG-ui-merchant
 ```
 
-> ⚠️ **镜像命名有个坑**：前端的 `PLATFORM` 取值是 `cashier` / `manager` / `merchant`，
-> 但镜像名不是 `jeepay-ui-cashier` —— `docker-compose.prod.yml` 里用的是
-> **`jeepay-ui-payment`**。所以构建 cashier 时必须 `-t $REG/jeepay-ui-payment:$TAG`，
-> 写成 `jeepay-ui-$PLATFORM` 会导致 push 时报
-> `An image does not exist locally with the tag`，而 compose 拉不到镜像。
-> 六个名字必须与 compose 里 `${REGISTRY}/xxx:${IMAGE_TAG}` 完全一致。
+> ⚠️ **tag 后缀和 PLATFORM 取值不是一一对应的**：前端的 `PLATFORM` 是
+> `cashier` / `manager` / `merchant`，但 compose 里 `cashier` 那个位置的 tag 后缀是
+> **`ui-payment`**（因为该容器同时托管收银台静态页和支付网关的 `/api/` 反代）。
+> 所以构建 cashier 必须写成 `-t $REPO:$TAG-ui-payment --build-arg PLATFORM=cashier`，
+> 顺手写成 `$TAG-$PLATFORM` 会推出一个没人用的 `$TAG-cashier`，
+> 而 compose 拉 `$TAG-ui-payment` 时报 `manifest unknown`。
+> 六个 tag 必须与 compose 里 `${REGISTRY}:${IMAGE_TAG}-xxx` 完全一致。
 
-推送完自查一下六个镜像是否都在本地且名字正确：
+推送完自查一下六个 tag 是否都在本地且名字正确：
 
 ```bash
-for n in jeepay-payment jeepay-manager jeepay-merchant jeepay-ui-payment jeepay-ui-manager jeepay-ui-merchant; do
-  docker image inspect $REG/$n:$TAG >/dev/null 2>&1 && echo "OK   $n" || echo "缺失 $n"
+for n in payment manager merchant ui-payment ui-manager ui-merchant; do
+  docker image inspect $REPO:$TAG-$n >/dev/null 2>&1 && echo "OK   $TAG-$n" || echo "缺失 $TAG-$n"
 done
 ```
 
@@ -91,13 +93,13 @@ uname -m          # x86_64 就是 amd64，aarch64 就是 arm64
 
   ```bash
   docker buildx create --name multiarch --use
-  docker buildx build --platform linux/arm64 -t $REG/jeepay-payment:$TAG \
+  docker buildx build --platform linux/arm64 -t $REPO:$TAG-payment \
     --build-arg BASE_IMAGE=eclipse-temurin:17-jre --push ./jeepay-payment
   # 其余五个同理，前端三个把 --build-arg 换成 PLATFORM=xxx
   ```
 
-  注意 buildx 跨架构构建较慢（前端 `npm install` 尤其慢），且 `${REGISTRY}/jeepay-*`
-  必须是**同一个架构**的一组镜像，不能混。
+  注意 buildx 跨架构构建较慢（前端 `npm install` 尤其慢），且同一个仓库下这六个
+  tag 必须是**同一个架构**，不能混。
 
 ---
 
@@ -122,7 +124,7 @@ bash docs/deploy/make-bundle.sh
 产物：
 
 - `deploy-out/jeepay-deploy/` —— 解压前的原始文件，可以先编辑再上传
-- `deploy-out/jeepay-deploy-<日期>.tar.gz` —— 上传用压缩包（约 32K）
+- `deploy-out/jeepay-deploy-<日期>.tar.gz` —— 上传用压缩包（约 40K）
 
 包内含：
 
@@ -135,6 +137,7 @@ docker/rocketmq/broker/conf/broker.conf
 docs/sql/{init.sql,patch.sql}
 docs/deploy/{aliyun-acr-caddy.md,caddy-snippet.md}
 logs/{payment,manager,merchant}/
+seed-mch.sql                 # 商户种子数据（make-bundle.sh 自动调 make-seed.sh 生成）
 README-部署.txt
 ```
 
@@ -151,7 +154,17 @@ cd /usr/local/modelscube/jneelypay && tar -xzf jeepay-deploy-*.tar.gz && cd jeep
 > 里写死了 `name: jeepay`，compose 项目名和数据卷名（`jeepay_mysql`、`jeepay_redis`、
 > `jeepay_uploads`）都与目录名无关，命令在文档和服务器之间可以原样复制。
 
-### 2. 修改 `conf/*/application.yml`（三份都要改）
+### 2. 修改 `.env.prod` 与 `conf/*/application.yml`
+
+`.env.prod` 里只有三项要关心：
+
+| 变量 | 说明 |
+| --- | --- |
+| `REGISTRY` | **写到仓库名**：`<registry>/<namespace>/<repo>`，即 `.../skiyoumi/jneelypay`。六个镜像共用它，**结尾不带 `/`** |
+| `IMAGE_TAG` | 版本**前缀**，实际 tag 是 `${IMAGE_TAG}-payment` 这种形式。升级/回滚只改这一处 |
+| `MYSQL_ROOT_PASSWORD` | 改成强密码，并同步下面三份 application.yml |
+
+`conf/*/application.yml`（**三份都要改**）：
 
 | 配置项 | 默认值 | 生产环境应改为 |
 | --- | --- | --- |
@@ -335,20 +348,23 @@ curl -I https://mgr.你的域名
 ## 六、更新版本
 
 ```bash
-# 本地
+# 本地（六选六推，REPO / TAG 与第一节相同）
 mvn clean package -DskipTests
-docker build -t $REG/jeepay-payment:新TAG --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-payment
-docker push $REG/jeepay-payment:新TAG
+TAG=新版本号
+docker build -t $REPO:$TAG-payment --build-arg BASE_IMAGE=eclipse-temurin:17-jre ./jeepay-payment
+docker push  $REPO:$TAG-payment
+# 其余五个同理
 
 # 服务器
-vi .env.prod                      # IMAGE_TAG 改成新 TAG
+vi .env.prod                      # IMAGE_TAG 改成新版本号（前缀，不带 -payment 后缀）
 docker compose --env-file .env.prod -f docker-compose.prod.yml pull
 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 ```
 
-只改了后端、前端没动时，也可以用 `up -d payment` 只重启单个服务，
-但 `IMAGE_TAG` 是全量的，没重新构建的前端镜像会因 tag 不存在而拉取失败 ——
-**稳妥做法是六个一起推、一起拉**。
+`IMAGE_TAG` 是六个服务共用的版本前缀，**没重新构建的镜像会因 tag 不存在而拉取失败**，
+所以稳妥做法是六个一起推、一起拉。确实只改了后端时，也可以只重建并推后端三个，
+然后 `docker compose --env-file .env.prod -f docker-compose.prod.yml up -d payment` —— 前端
+`IMAGE_TAG` 不变、本地已有旧 tag，compose 不会去拉取。
 
 > 单独 `up -d payment` 不会让 ui-* 失效：ui 的 nginx 模板把上游解析推迟到了请求期
 > （见第二节末尾的说明），payment 换 IP 后 ui 会自动跟上。
@@ -361,11 +377,14 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 
 ## 七、回滚
 
-镜像 tag 就是版本号，改回旧 tag 重新 `up -d` 即可：
+镜像 tag 就是版本号，把 `IMAGE_TAG` 改回旧版本前缀再 `up -d` 即可：
 
 ```bash
-vi .env.prod          # IMAGE_TAG=3.2.9
+vi .env.prod          # IMAGE_TAG=3.2.8-ezfp
 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 ```
+
+回滚的前提是旧版本那六个 tag 还在仓库里 —— 所以**不要删旧 tag**。
+六个 tag 挤在同一个仓库里，正好可以在 ACR 控制台按 tag 一眼看到所有历史版本。
 
 数据库结构变更没有自动回滚，涉及表结构的大版本升级前先 `mysqldump` 备份。

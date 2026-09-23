@@ -102,7 +102,8 @@ cat > "${BUNDLE_DIR}/README-部署.txt" <<'EOF'
 ================================================
 
 1. 修改配置
-   vi .env.prod                      # REGISTRY / IMAGE_TAG / MYSQL_ROOT_PASSWORD
+   vi .env.prod                      # REGISTRY(要写到仓库名，如 .../skiyoumi/jneelypay)
+                                     # IMAGE_TAG(版本前缀) / MYSQL_ROOT_PASSWORD
    vi conf/payment/application.yml   # 三份都要改：
    vi conf/manager/application.yml   #   spring.datasource.password 与 .env.prod 一致
    vi conf/merchant/application.yml  #   isys.allow-cors -> false
