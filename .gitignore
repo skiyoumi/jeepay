@@ -62,3 +62,6 @@ docker/rocketmq/namesrv/
 .env
 # 生产环境编排变量（含镜像仓库地址与数据库密码，不应提交；模板见 .env.prod.example）
 .env.prod
+
+# [部署包输出目录（make-bundle.sh 产物，不应提交）]
+deploy-out/

@@ -7,11 +7,14 @@
 #
 # 与 docker-compose.yml 的差异（均出于生产环境考虑，请勿直接改回）：
 #   1. 六个业务服务只 pull 不 build，镜像由本地构建后推送到私有仓库；
-#   2. 所有端口只绑定 127.0.0.1，统一由宿主机上的 Caddy 反代并终结 HTTPS，
+#   2. 所有端口只绑定 127.0.0.1，统一由已存在的 Caddy 容器反代并终结 HTTPS，
 #      避免 MySQL/Redis/RocketMQ 直接暴露到公网；
-#   3. ui-* 的 BACKEND_HOST 仍使用固定 IP：nginx 的 proxy_pass 带变量时是
-#      请求期解析，需要 resolver 指令配合，用固定 IP 可绕开该问题；
-#   4. mysql 基础镜像固定为多架构的 mysql:8.0.25，见 docker-compose.override.yml 的说明。
+#   3. 不占用固定网段、不使用静态 IP —— 服务器上往往已有多个 compose 项目，
+#      Docker 默认会把 172.18/172.19/172.20… 依次分出去，写死 172.20.0.0/16
+#      极可能与现有网络冲突导致 up 失败。这里全部改用服务名互访；
+#   4. 服务名互访需要容器内能解析 Docker 内置 DNS，故 ui-* 额外挂载了一份
+#      conf/nginx/default.conf.template（比镜像内多一行 resolver 127.0.0.11）；
+#   5. mysql 基础镜像固定为多架构的 mysql:8.0.25，见 docker-compose.override.yml 的说明。
 #
 # 注意：使用 -f docker-compose.prod.yml 时 Compose 不会自动合并 docker-compose.override.yml，
 #      本文件是自包含的。切换编排文件前请先执行 down，避免两套文件互相覆盖容器。
@@ -43,12 +46,8 @@ services:
       # 首次启动（数据卷为空）时自动执行，之后不再执行；建表脚本已包含 ezfp 通道定义
       - ./docs/sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
       - ./docs/sql/patch.sql:/docker-entrypoint-initdb.d/02-patch.sql:ro
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.10
 
   rocketmq-namesrv:
-    platform: linux/amd64
     image: ${ROCKETMQ_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/rocketmq:5.3.1}
     hostname: rocketmq-namesrv
     container_name: jeepay-rocketmq-namesrv
@@ -67,12 +66,8 @@ services:
       start_period: 40s
     volumes:
       - rocketmq_namesrv_logs:/home/rocketmq/logs
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.11
 
   rocketmq-broker:
-    platform: linux/amd64
     image: ${ROCKETMQ_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/rocketmq:5.3.1}
     hostname: rocketmq-broker
     container_name: jeepay-rocketmq-broker
@@ -99,16 +94,12 @@ services:
       - rocketmq_broker_logs:/home/rocketmq/logs
       - rocketmq_broker_store:/home/rocketmq/store
       - ./docker/rocketmq/broker/conf/broker.conf:/home/rocketmq/rocketmq-5.3.1/conf/broker.conf:ro
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.13
 
   redis:
-    platform: linux/amd64
+    image: ${REDIS_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/redis:6.2.14}
     hostname: redis
     container_name: jeepay-redis
     restart: always
-    image: ${REDIS_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/redis:6.2.14}
     # Redis 仅供集群内部使用，不对宿主机暴露，故沿用镜像默认配置（无密码）。
     # 如确需外部访问，请在 command 中加 --requirepass，并同步修改 conf/*/application.yml
     expose:
@@ -121,9 +112,6 @@ services:
       start_period: 10s
     volumes:
       - redis:/data
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.12
 
   payment:
     image: ${REGISTRY}/jeepay-payment:${IMAGE_TAG}
@@ -152,9 +140,6 @@ services:
       # payment 侧直接本地读取即可，不依赖 OSS 下载（isys.oss.service-type=local）。
       # 若改成各挂各的匿名卷，通过后台配的渠道证书在 payment 里会读不到。
       - uploads:/jeepayhomes/service/uploads
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.21
 
   manager:
     image: ${REGISTRY}/jeepay-manager:${IMAGE_TAG}
@@ -180,9 +165,6 @@ services:
       - ./logs/manager:/jeepayhomes/service/logs
       - ./conf/manager/application.yml:/jeepayhomes/service/app/application.yml
       - uploads:/jeepayhomes/service/uploads
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.22
 
   merchant:
     image: ${REGISTRY}/jeepay-merchant:${IMAGE_TAG}
@@ -207,9 +189,6 @@ services:
     volumes:
       - ./logs/merchant:/jeepayhomes/service/logs
       - ./conf/merchant/application.yml:/jeepayhomes/service/app/application.yml
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.23
 
   # 统一收银台 + 支付网关 HTTP 入口：既托管 cashier 静态页，又把 /api/ 反代到 payment，
   # 因此 paySiteUrl 指向本服务即可同时满足收银台访问与异步通知回调。
@@ -219,15 +198,17 @@ services:
     container_name: jeepay-ui-payment
     restart: always
     environment:
-      - BACKEND_HOST=172.20.0.21:9216
+      # 用服务名而非静态 IP：由容器内 nginx 通过 Docker 内置 DNS 解析，
+      # 依赖挂载进来的 conf/nginx/default.conf.template 中的 resolver 指令
+      - BACKEND_HOST=payment:9216
     ports:
+      # 仅本机可访问，用于不上 Caddy 时快速验证页面是否正常；公网入口走 Caddy
       - "127.0.0.1:9226:80"
+    volumes:
+      - ./conf/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       payment:
         condition: service_healthy
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.31
 
   ui-manager:
     image: ${REGISTRY}/jeepay-ui-manager:${IMAGE_TAG}
@@ -235,15 +216,14 @@ services:
     container_name: jeepay-ui-manager
     restart: always
     environment:
-      - BACKEND_HOST=172.20.0.22:9217
+      - BACKEND_HOST=manager:9217
     ports:
       - "127.0.0.1:9227:80"
+    volumes:
+      - ./conf/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       manager:
         condition: service_healthy
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.32
 
   ui-merchant:
     image: ${REGISTRY}/jeepay-ui-merchant:${IMAGE_TAG}
@@ -251,21 +231,21 @@ services:
     container_name: jeepay-ui-merchant
     restart: always
     environment:
-      - BACKEND_HOST=172.20.0.23:9218
+      - BACKEND_HOST=merchant:9218
     ports:
       - "127.0.0.1:9228:80"
+    volumes:
+      - ./conf/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       merchant:
         condition: service_healthy
-    networks:
-      jeepay:
-        ipv4_address: 172.20.0.33
 
 networks:
-  jeepay:
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+  # 固定网络名，便于把已有的 Caddy 容器接进来：
+  #   docker network connect jeepay-net sub2api-caddy
+  # 不指定 ipam，由 Docker 自动挑选空闲网段，规避与其它 compose 项目的网段冲突。
+  default:
+    name: jeepay-net
 
 volumes:
   mysql:

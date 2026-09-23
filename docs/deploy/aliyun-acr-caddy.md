@@ -64,18 +64,72 @@ docker push $REG/jeepay-ui-merchant:$TAG
 > 前端 `npm install` 走的是 `registry.npmmirror.com`，国内可直连；
 > 若超时，先执行 `docker build --network=host ...`。
 
+**架构要对齐**：先确认服务器的 CPU 架构
+
+```bash
+uname -m          # x86_64 就是 amd64，aarch64 就是 arm64
+```
+
+- 服务器是 **x86_64**：上面的命令直接可用，不用加参数。
+- 服务器是 **aarch64**：你的 Windows 本机是 amd64，推上去的镜像在服务器上会报
+  `exec format error`，需要改走 buildx 跨架构构建：
+
+  ```bash
+  docker buildx create --name multiarch --use
+  docker buildx build --platform linux/arm64 -t $REG/jeepay-payment:$TAG \
+    --build-arg BASE_IMAGE=eclipse-temurin:17-jre --push ./jeepay-payment
+  # 其余五个同理，前端三个把 --build-arg 换成 PLATFORM=xxx
+  ```
+
+  注意 buildx 跨架构构建较慢（前端 `npm install` 尤其慢），且 `${REGISTRY}/jeepay-*`
+  必须是**同一个架构**的一组镜像，不能混。
+
 ---
 
 ## 二、服务器：拉取并启动
 
+> 下文假设服务器上**已经有一个跑着的 Caddy 容器**（如 `sub2api-caddy`）。
+> 它与本方案的衔接见第三节，最关键的坑是：
+> **Caddy 容器里的 `127.0.0.1` 是它自己**，上游必须用容器名。
+
 ### 1. 准备目录
 
-只需 `git clone` 一次本仓库，用到的只有编排文件、SQL 脚本、MQ 配置和 `conf/`：
+服务器上**不需要 git**，也不需要源码。整个部署实际只用到 9 个文件/目录
+（就是 `docker-compose.prod.yml` 里所有宿主机绑定挂载的路径），
+Java 源码、`pom.xml`、`jeepay-ui` 源码都已经在镜像里了。
+
+在本机（构建机器）生成部署包：
 
 ```bash
-git clone -b feature/ezfp-channel <你的仓库地址> jeepay && cd jeepay
-cp .env.prod.example .env.prod
-vi .env.prod      # 改 REGISTRY / IMAGE_TAG / MYSQL_ROOT_PASSWORD
+bash docs/deploy/make-bundle.sh
+```
+
+产物：
+
+- `deploy-out/jeepay-deploy/` —— 解压前的原始文件，可以先编辑再上传
+- `deploy-out/jeepay-deploy-<日期>.tar.gz` —— 上传用压缩包（约 32K）
+
+包内含：
+
+```
+docker-compose.prod.yml
+.env.prod                    # 已替你 cp 好 .env.prod.example
+conf/{payment,manager,merchant}/application.yml
+conf/nginx/default.conf.template          # 供 ui-* 用服务名反代（比镜像内多一行 resolver）
+docker/rocketmq/broker/conf/broker.conf
+docs/sql/{init.sql,patch.sql}
+docs/deploy/{aliyun-acr-caddy.md,caddy-snippet.md}
+logs/{payment,manager,merchant}/
+README-部署.txt
+```
+
+上传并解压：
+
+```bash
+scp deploy-out/jeepay-deploy-*.tar.gz root@你的服务器:/opt/
+
+# 服务器上
+cd /opt && tar -xzf jeepay-deploy-*.tar.gz && cd jeepay-deploy
 ```
 
 ### 2. 修改 `conf/*/application.yml`（三份都要改）
@@ -84,9 +138,9 @@ vi .env.prod      # 改 REGISTRY / IMAGE_TAG / MYSQL_ROOT_PASSWORD
 | --- | --- | --- |
 | `spring.datasource.password` | `rootroot` | 与 `.env.prod` 的 `MYSQL_ROOT_PASSWORD` 一致 |
 | `isys.allow-cors` | `true` | 不需要跨域就改 `false`（你走同域反代，用不到） |
-| `isys.oss.file-root-path` | `/jeepayhomes/service/uploads` | 保持默认即可，已由 compose 挂成命名卷 |
 | `logging.level.com.jeequan.jeepay` | `debug` | 生产建议 `info`，否则日志量很大 |
 
+`isys.oss.file-root-path` 保持默认即可，已由 compose 挂成命名卷。
 `cache-config: false` 保持不变 —— 这样改系统配置不需要重启服务。
 
 > 三份文件里 `spring.datasource.url` 写的是主机名 `mysql`、Redis 写的是 `redis`，
@@ -104,11 +158,23 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 
 - 六个业务服务**只 pull 不 build**；
 - **所有端口只绑 `127.0.0.1`**，MySQL / Redis / RocketMQ 完全不对外暴露；
-- 前端容器用固定 IP 作为 `BACKEND_HOST`（nginx 的 `proxy_pass` 带变量时是请求期解析，
-  必须配 `resolver` 才能用服务名，固定 IP 可绕开）。
+- **不占用固定网段**。服务器上通常已有多个 compose 项目，Docker 会把
+  `172.18/172.19/172.20…` 依次分出去；原先写死的 `172.20.0.0/16`
+  极可能与现有网络冲突并导致 `up` 报
+  `Pool overlaps with other one on this address space`。
+  这里改为 Docker 自动选网段 + 服务名互访，网络名固定为 `jeepay-net`；
+- `ui-*` 额外挂载了 `conf/nginx/default.conf.template`。因为 nginx 的
+  `proxy_pass http://$BACKEND_HOST` 带变量时是**请求期解析**，必须指定 DNS 服务器，
+  模板里比镜像内置版本多一行 `resolver 127.0.0.11`（Docker 内置 DNS）。
 
 > 使用 `-f docker-compose.prod.yml` 时 Compose **不会**自动合并 `docker-compose.override.yml`，
 > 该文件是自包含的。从旧编排文件切过来时先 `down`，避免两套文件互相覆盖容器。
+
+**启动前先确认端口没被占用**（本文档假设这些端口空闲）：
+
+```bash
+ss -lntp | grep -E ':(9216|9217|9218|9226|9227|9228)\b' || echo "端口空闲"
+```
 
 ### 4. 首次初始化数据库
 
@@ -128,18 +194,33 @@ docker exec -i jeepay-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" < jeepaydb.sql
 
 ---
 
-## 三、Caddy 配置
+## 三、Caddy 配置（容器版）
 
-你已经有 Caddy，只需把三个站点片段追加到现有 Caddyfile 末尾。
-完整说明见 [`caddy-snippet.md`](./caddy-snippet.md)。摘要：
+你的 Caddy 是容器，**上游不能用 `127.0.0.1`**，要先把 Caddy 容器接进 jeepay 的网络：
 
-```caddy
-pay.example.com { encode gzip; reverse_proxy 127.0.0.1:9226 }
-mch.example.com { encode gzip; reverse_proxy 127.0.0.1:9228 }
-mgr.example.com { encode gzip; reverse_proxy 127.0.0.1:9227 }
+```bash
+docker network connect jeepay-net sub2api-caddy
+docker exec sub2api-caddy nslookup jeepay-ui-payment    # 验证能解析
 ```
 
-放行 80 / 443，其余端口全部关闭。
+然后把三个站点追加到现有 Caddyfile 末尾（**不要**加全局 `{}` 块）：
+
+```caddy
+pay.example.com { encode gzip; reverse_proxy jeepay-ui-payment:80 }
+mch.example.com { encode gzip; reverse_proxy jeepay-ui-merchant:80 }
+mgr.example.com { encode gzip; reverse_proxy jeepay-ui-manager:80 }
+```
+
+```bash
+docker exec sub2api-caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+上游写的是容器内的 **80**，不是宿主机的 9226/9228/9227。
+
+> 每次 `sub2api-caddy` 被重建后，`docker network connect` 会失效，需要重新执行。
+> 想一劳永逸就在 sub2api 的 compose 里把 `jeepay-net` 声明为 `external: true` 并加进 caddy 服务的 networks。
+>
+> 完整说明（含如何定位 Caddyfile 在宿主机的位置）见 [`caddy-snippet.md`](./caddy-snippet.md)。
 
 ---
 
@@ -221,6 +302,10 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 只改了后端、前端没动时，也可以用 `up -d payment` 只重启单个服务，
 但 `IMAGE_TAG` 是全量的，没重新构建的前端镜像会因 tag 不存在而拉取失败 ——
 **稳妥做法是六个一起推、一起拉**。
+
+> 服务器上**不需要重新上传部署包**：纯版本升级只改 `.env.prod` 里的 `IMAGE_TAG`。
+> 只有下列文件发生变化时才需要重新 `make-bundle.sh` + 上传：
+> `docker-compose.prod.yml`、`conf/*/application.yml`、`docs/sql/*.sql`、`broker.conf`。
 
 ---
 

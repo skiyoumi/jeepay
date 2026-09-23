@@ -1,0 +1,67 @@
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name localhost;
+    root        /workspace/;
+
+    # 与镜像内置的 default.conf.template 唯一的差异就是这一行。
+    #
+    # 内置版本把 proxy_pass 写成 http://$BACKEND_HOST —— 带变量的 proxy_pass
+    # 不会在 nginx 启动时解析，而是在【每个请求】到来时解析，因此必须指定 DNS 服务器，
+    # 否则报 "no resolver defined to resolve xxx"。
+    # 127.0.0.11 是 Docker 用户自定义网络里的内置 DNS，能解析同网络内的服务名/容器名。
+    #
+    # 内置版本之所以不带这行，是因为它默认 BACKEND_HOST 直接写死 IP（见 docker-compose.yml）。
+    # 生产环境写死 IP 需要固定网段，而服务器上常有多个 compose 项目抢占 172.18~172.22，
+    # 故改用服务名 + resolver 的方式。
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    try_files $uri $uri/ /index.html;
+
+    location /api/ {
+        proxy_next_upstream http_502 http_504 error timeout invalid_header;
+
+        proxy_pass http://$BACKEND_HOST;
+
+        proxy_set_header Host  $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # 保证后端能识别到外层 Caddy 终结的 https（server.forward-headers-strategy: framework），
+        # 否则收银台 return_url、微信 H5 redirect_url 会拼成 http
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # favicon.ico
+    location = /favicon.ico {
+        log_not_found off;
+        access_log    off;
+    }
+
+    # robots.txt
+    location = /robots.txt {
+        log_not_found off;
+        access_log    off;
+    }
+
+    # assets, media
+    location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
+        expires    7d;
+        access_log off;
+    }
+
+    # svg, fonts
+    location ~* \.(?:svgz?|ttf|ttc|otf|eot|woff2?)$ {
+        add_header Access-Control-Allow-Origin "*";
+        expires    7d;
+        access_log off;
+    }
+
+    # gzip
+    gzip            on;
+    gzip_vary       on;
+    gzip_proxied    any;
+    gzip_comp_level 6;
+    gzip_types      text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
+}
