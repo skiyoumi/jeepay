@@ -148,6 +148,9 @@ services:
     volumes:
       - ./logs/payment:/jeepayhomes/service/logs
       - ./conf/payment/application.yml:/jeepayhomes/service/app/application.yml
+      # 与 manager 共用同一个上传卷：证书、图标等文件在运营平台上传统一存放，
+      # payment 侧直接本地读取即可，不依赖 OSS 下载（isys.oss.service-type=local）。
+      # 若改成各挂各的匿名卷，通过后台配的渠道证书在 payment 里会读不到。
       - uploads:/jeepayhomes/service/uploads
     networks:
       jeepay:
