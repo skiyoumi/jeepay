@@ -61,6 +61,21 @@ docker push $REG/jeepay-ui-manager:$TAG
 docker push $REG/jeepay-ui-merchant:$TAG
 ```
 
+> ⚠️ **镜像命名有个坑**：前端的 `PLATFORM` 取值是 `cashier` / `manager` / `merchant`，
+> 但镜像名不是 `jeepay-ui-cashier` —— `docker-compose.prod.yml` 里用的是
+> **`jeepay-ui-payment`**。所以构建 cashier 时必须 `-t $REG/jeepay-ui-payment:$TAG`，
+> 写成 `jeepay-ui-$PLATFORM` 会导致 push 时报
+> `An image does not exist locally with the tag`，而 compose 拉不到镜像。
+> 六个名字必须与 compose 里 `${REGISTRY}/xxx:${IMAGE_TAG}` 完全一致。
+
+推送完自查一下六个镜像是否都在本地且名字正确：
+
+```bash
+for n in jeepay-payment jeepay-manager jeepay-merchant jeepay-ui-payment jeepay-ui-manager jeepay-ui-merchant; do
+  docker image inspect $REG/$n:$TAG >/dev/null 2>&1 && echo "OK   $n" || echo "缺失 $n"
+done
+```
+
 > 前端 `npm install` 走的是 `registry.npmmirror.com`，国内可直连；
 > 若超时，先执行 `docker build --network=host ...`。
 
@@ -184,17 +199,41 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 ss -lntp | grep -E ':(9216|9217|9218|9226|9227|9228)\b' || echo "端口空闲"
 ```
 
-### 4. 首次初始化数据库
+### 4. 首次初始化数据库（关键，别跳过）
 
-`init.sql` / `patch.sql` 只在 **MySQL 数据卷为空**时执行。首次 `up` 会全自动完成，
-其中包括 ezfp 通道定义。若你之前已在本机跑过、想复用数据，导出导入即可：
+`init.sql` / `patch.sql` 只在 **MySQL 数据卷为空**时执行，首次 `up` 会全自动建表，
+其中包含 ezfp 通道定义。
+
+但要注意 **`init.sql` 不包含任何商户** —— 它只预置了运营平台超管 `jeepay`。
+也就是说全新初始化的库里：
+
+- 商户平台**没有任何账号，登录不进去**；
+- ezfp 的 PID / 密钥**不存在**，得从零重填。
+
+所以要么在运营平台手工建商户再配通道，要么直接导入本机已有的配置。
+后者快得多，用 `make-seed.sh` 生成种子：
 
 ```bash
-# 本地导出（结构 + 数据）
-docker exec jeepay-mysql mysqldump -uroot -prootroot --databases jeepaydb > jeepaydb.sql
-# 传到服务器后导入
-docker exec -i jeepay-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" < jeepaydb.sql
+# 本机（需 jeepay-mysql 容器在运行）
+bash docs/deploy/make-seed.sh
+# 输出 deploy-out/seed-mch.sql，含商户、登录账号、应用、渠道参数（不含订单流水）
 ```
+
+`make-bundle.sh` 会自动把它打进部署包。服务器上等 MySQL healthy 后导入：
+
+```bash
+docker exec -i jeepay-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" jeepaydb < seed-mch.sql
+```
+
+导入后用原来的商户账号密码即可登录（本机是 `modelscube`）。
+
+> 想连订单历史一起带过去，就整库导：
+> ```bash
+> docker exec jeepay-mysql mysqldump -uroot -prootroot --databases jeepaydb > jeepaydb.sql
+> ```
+> 但要注意本机的 `t_sys_config` 里是 `host.docker.internal`（第四步反正要改），
+> 而且会一并带上联调用的测试商户 `M_EZFPTEST`（弱密钥 `ezfptestsecret123456`），
+> 上线前应删掉。
 
 > `patch.sql` 在全新初始化时会多次报 `Duplicate column name` / `Duplicate entry`
 > 之类的告警（它按“逐条补丁”设计，不判断是否已存在）。**这是无害的**，
