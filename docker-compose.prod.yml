@@ -1,0 +1,273 @@
+# 生产部署编排文件（镜像来自私有仓库，服务器上不执行 Maven / npm 构建）
+#
+# 用法：
+#   cp .env.prod.example .env.prod      # 按需修改仓库地址与镜像标签
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml pull
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#
+# 与 docker-compose.yml 的差异（均出于生产环境考虑，请勿直接改回）：
+#   1. 六个业务服务只 pull 不 build，镜像由本地构建后推送到私有仓库；
+#   2. 所有端口只绑定 127.0.0.1，统一由宿主机上的 Caddy 反代并终结 HTTPS，
+#      避免 MySQL/Redis/RocketMQ 直接暴露到公网；
+#   3. ui-* 的 BACKEND_HOST 仍使用固定 IP：nginx 的 proxy_pass 带变量时是
+#      请求期解析，需要 resolver 指令配合，用固定 IP 可绕开该问题；
+#   4. mysql 基础镜像固定为多架构的 mysql:8.0.25，见 docker-compose.override.yml 的说明。
+#
+# 注意：使用 -f docker-compose.prod.yml 时 Compose 不会自动合并 docker-compose.override.yml，
+#      本文件是自包含的。切换编排文件前请先执行 down，避免两套文件互相覆盖容器。
+
+services:
+  mysql:
+    hostname: mysql
+    container_name: jeepay-mysql
+    restart: always
+    image: ${MYSQL_IMAGE:-mysql:8.0.25}
+    environment:
+      LANG: C.UTF-8
+      # 生产环境务必修改：改完后需同步修改 conf/*/application.yml 中的 datasource.password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootroot}
+      MYSQL_DATABASE: "jeepaydb"
+      MYSQL_USER: "jeepay"
+      MYSQL_PASSWORD: "jeepay"
+    # 默认不对宿主机暴露；需要用客户端连库时改为 "127.0.0.1:13306:3306"
+    expose:
+      - "3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - mysql:/var/lib/mysql
+      # 首次启动（数据卷为空）时自动执行，之后不再执行；建表脚本已包含 ezfp 通道定义
+      - ./docs/sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./docs/sql/patch.sql:/docker-entrypoint-initdb.d/02-patch.sql:ro
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.10
+
+  rocketmq-namesrv:
+    platform: linux/amd64
+    image: ${ROCKETMQ_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/rocketmq:5.3.1}
+    hostname: rocketmq-namesrv
+    container_name: jeepay-rocketmq-namesrv
+    restart: always
+    user: "0:0"
+    expose:
+      - "9876"
+    environment:
+      HEAP_OPTS: "-Xms256m -Xmx256m -Xmn128m"
+    command: sh mqnamesrv
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9876'"]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+      start_period: 40s
+    volumes:
+      - rocketmq_namesrv_logs:/home/rocketmq/logs
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.11
+
+  rocketmq-broker:
+    platform: linux/amd64
+    image: ${ROCKETMQ_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/rocketmq:5.3.1}
+    hostname: rocketmq-broker
+    container_name: jeepay-rocketmq-broker
+    restart: always
+    user: "0:0"
+    expose:
+      - "10909"
+      - "10911"
+      - "10912"
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/rocketmq-5.3.1/conf/broker.conf
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/10911'"]
+      interval: 15s
+      timeout: 15s
+      retries: 15
+      start_period: 120s
+    volumes:
+      - rocketmq_broker_logs:/home/rocketmq/logs
+      - rocketmq_broker_store:/home/rocketmq/store
+      - ./docker/rocketmq/broker/conf/broker.conf:/home/rocketmq/rocketmq-5.3.1/conf/broker.conf:ro
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.13
+
+  redis:
+    platform: linux/amd64
+    hostname: redis
+    container_name: jeepay-redis
+    restart: always
+    image: ${REDIS_IMAGE:-swr.cn-south-1.myhuaweicloud.com/jeepay/redis:6.2.14}
+    # Redis 仅供集群内部使用，不对宿主机暴露，故沿用镜像默认配置（无密码）。
+    # 如确需外部访问，请在 command 中加 --requirepass，并同步修改 conf/*/application.yml
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - redis:/data
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.12
+
+  payment:
+    image: ${REGISTRY}/jeepay-payment:${IMAGE_TAG}
+    hostname: payment
+    container_name: jeepay-payment
+    restart: always
+    expose:
+      - "9216"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9216'"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rocketmq-broker:
+        condition: service_healthy
+    volumes:
+      - ./logs/payment:/jeepayhomes/service/logs
+      - ./conf/payment/application.yml:/jeepayhomes/service/app/application.yml
+      - uploads:/jeepayhomes/service/uploads
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.21
+
+  manager:
+    image: ${REGISTRY}/jeepay-manager:${IMAGE_TAG}
+    hostname: manager
+    container_name: jeepay-manager
+    restart: always
+    expose:
+      - "9217"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9217'"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rocketmq-broker:
+        condition: service_healthy
+    volumes:
+      - ./logs/manager:/jeepayhomes/service/logs
+      - ./conf/manager/application.yml:/jeepayhomes/service/app/application.yml
+      - uploads:/jeepayhomes/service/uploads
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.22
+
+  merchant:
+    image: ${REGISTRY}/jeepay-merchant:${IMAGE_TAG}
+    hostname: merchant
+    container_name: jeepay-merchant
+    restart: always
+    expose:
+      - "9218"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9218'"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rocketmq-broker:
+        condition: service_healthy
+    volumes:
+      - ./logs/merchant:/jeepayhomes/service/logs
+      - ./conf/merchant/application.yml:/jeepayhomes/service/app/application.yml
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.23
+
+  # 统一收银台 + 支付网关 HTTP 入口：既托管 cashier 静态页，又把 /api/ 反代到 payment，
+  # 因此 paySiteUrl 指向本服务即可同时满足收银台访问与异步通知回调。
+  ui-payment:
+    image: ${REGISTRY}/jeepay-ui-payment:${IMAGE_TAG}
+    hostname: payment-ui
+    container_name: jeepay-ui-payment
+    restart: always
+    environment:
+      - BACKEND_HOST=172.20.0.21:9216
+    ports:
+      - "127.0.0.1:9226:80"
+    depends_on:
+      payment:
+        condition: service_healthy
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.31
+
+  ui-manager:
+    image: ${REGISTRY}/jeepay-ui-manager:${IMAGE_TAG}
+    hostname: manager-ui
+    container_name: jeepay-ui-manager
+    restart: always
+    environment:
+      - BACKEND_HOST=172.20.0.22:9217
+    ports:
+      - "127.0.0.1:9227:80"
+    depends_on:
+      manager:
+        condition: service_healthy
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.32
+
+  ui-merchant:
+    image: ${REGISTRY}/jeepay-ui-merchant:${IMAGE_TAG}
+    hostname: merchant-ui
+    container_name: jeepay-ui-merchant
+    restart: always
+    environment:
+      - BACKEND_HOST=172.20.0.23:9218
+    ports:
+      - "127.0.0.1:9228:80"
+    depends_on:
+      merchant:
+        condition: service_healthy
+    networks:
+      jeepay:
+        ipv4_address: 172.20.0.33
+
+networks:
+  jeepay:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  mysql:
+  redis:
+  uploads:
+  rocketmq_namesrv_logs:
+  rocketmq_broker_logs:
+  rocketmq_broker_store:
