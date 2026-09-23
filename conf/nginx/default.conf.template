@@ -10,7 +10,16 @@ server {
 
     try_files $uri $uri/ /index.html;
 
-    location /api/ {
+    # 必须写 ^~：nginx 的匹配顺序是「先找最长前缀 location，再按顺序试正则 location，
+    # 正则命中就覆盖前缀结果」——不带 ^~ 时，下面那条匹配 .png/.jpg/.js 等扩展名的
+    # 静态资源正则会把 /api/ 的请求抢走，跑到 /workspace/ 下去找文件并返回 404。
+    # 典型受害路径：
+    #   /api/scan/imgs/{aes}.png          收银台二维码（DBApplicationConfig.genScanImgUrl）
+    #   /api/anon/localOssFiles/**/*.png  后台上传的通道图标等（StaticController）
+    # 这两个都是真实文件请求但由后端动态生成/读取，必须以 .png 结尾，所以必然撞上。
+    # 加 ^~ 后前缀匹配一旦命中就终止正则查找，全部交给后端。
+    # 本机联调时 paySiteUrl 直连 payment:9216 绕过了 nginx，所以只有生产环境会暴露。
+    location ^~ /api/ {
         proxy_next_upstream http_502 http_504 error timeout invalid_header;
 
         # 关于这两行，以及为什么不能直接写 proxy_pass http://$BACKEND_HOST：
